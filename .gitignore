@@ -1,0 +1,15 @@
+# Environment files with secrets
+.env
+*.env
+!.env.example
+
+# Python virtual environments
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# System files
+.DS_Store
