@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from os_adapter import OSAdapter
 
-load_dotenv()
+load_dotenv("/root/armor/agent/.env")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -12,6 +12,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID"))
 OPENWRT_IP = os.getenv("OPENWRT_IP")
 OPENWRT_USER = os.getenv("OPENWRT_USER")
+HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
 HOSTNAME = os.getenv("HOSTNAME", "unknown")
 adapter = OSAdapter()
 
@@ -35,6 +36,17 @@ def manage_router_lock(action):
     except Exception as e:
         logger.error(f"Router lock error: {e}")
         return False
+
+
+def heartbeat_loop():
+    if not HEALTHCHECK_URL: return
+    logger.info("Healthcheck heartbeat started.")
+    while True:
+        try:
+            requests.get(HEALTHCHECK_URL, timeout=10)
+        except Exception as e:
+            logger.error(f"Heartbeat failed: {e}")
+        time.sleep(300)  # Send heartbeat every 5 minutes
 
 def watchdog_loop():
     logger.info("Watchdog started.")
@@ -115,6 +127,7 @@ async def sleep_cmd(u, c):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=watchdog_loop, daemon=True).start()
     for h in [CommandHandler("start", start), CommandHandler("status", status), CommandHandler("top", top),
               CommandHandler("pause", pause), CommandHandler("resume", resume), CommandHandler("sleep", sleep_cmd),
