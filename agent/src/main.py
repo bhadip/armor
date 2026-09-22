@@ -1,4 +1,4 @@
-import os, datetime, logging, threading, time, requests, paramiko, json
+import os, datetime, json, datetime, logging, threading, time, requests, paramiko, json
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -48,6 +48,22 @@ def heartbeat_loop():
             logger.error(f"Heartbeat failed: {e}")
         time.sleep(300)  # Send heartbeat every 5 minutes
 
+
+def get_network_context():
+    try:
+        import requests
+        resp = requests.get('http://ip-api.com/json/', timeout=5).json()
+        lat, lon = resp.get('lat', 0), resp.get('lon', 0)
+        maps_link = f"https://maps.google.com/?q={lat},{lon}"
+        ts = datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
+        return (
+            f"Time: {ts}\n"
+            f"ISP Location: {resp.get('city')}, {resp.get('country')} _(Data Exchange)_\n"
+            f"Coords: {lat}, {lon} ({maps_link})\n"
+            f"IP: {resp.get('query')} · {resp.get('isp')}"
+        )
+    except Exception as e:
+        return f"Context Error: {e}"
 def watchdog_loop():
     logger.info("Watchdog started.")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -133,6 +149,16 @@ def main():
               CommandHandler("pause", pause), CommandHandler("resume", resume), CommandHandler("sleep", sleep_cmd),
               CallbackQueryHandler(btn)]:
         app.add_handler(h)
+    
+    # Send Startup Alert
+    context = get_network_context()
+    startup_msg = f"🟢 *{HOSTNAME} System Booted*\n\n{context}"
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+                      data={"chat_id": ADMIN_CHAT_ID, "text": startup_msg, "parse_mode": "Markdown"})
+    except Exception as e:
+        logger.error(f"Startup alert failed: {e}")
+
     app.run_polling()
 
 if __name__ == '__main__': main()
