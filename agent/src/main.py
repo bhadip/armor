@@ -1,164 +1,222 @@
-import os, datetime, json, datetime, logging, threading, time, requests, paramiko, json
+import os
+import json
+import time
+import datetime
+import logging
+import threading
+import subprocess
+import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from os_adapter import OSAdapter
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = int(os.getenv("TELEGRAM_ADMIN_CHAT_ID"))
-OPENWRT_IP = os.getenv("OPENWRT_IP")
-OPENWRT_USER = os.getenv("OPENWRT_USER")
+HOSTNAME = os.getenv("HOSTNAME", "node")
+OPENWRT_IP = os.getenv("OPENWRT_IP", "192.168.50.4")
+OPENWRT_USER = os.getenv("OPENWRT_USER", "root")
 HEALTHCHECK_URL = os.getenv("HEALTHCHECK_URL", "")
-HOSTNAME = os.getenv("HOSTNAME", "unknown")
+
+THRESHOLDS_FILE = os.path.join(os.path.dirname(__file__), "..", "thresholds.json")
+DEFAULT_THRESHOLDS = {"cpu_warn": 80, "cpu_crit": 95, "ram_warn": 80, "ram_crit": 95,
+                      "disk_warn": 85, "disk_crit": 95, "gpu_warn": 80, "gpu_crit": 95}
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+from os_adapter import OSAdapter
 adapter = OSAdapter()
 
-# State tracking for watchdog
-alert_states = {
-    'cpu': {'active': False, 'acked': False, 'last_alert': 0},
-    'ram': {'active': False, 'acked': False, 'last_alert': 0},
-    'disk': {'active': False, 'acked': False, 'last_alert': 0}
-}
+alert_states = {'cpu': {'state': 'normal', 'acked': False, 'last_alert': 0}, 'ram': {'state': 'normal', 'acked': False, 'last_alert': 0}, 'disk': {'state': 'normal', 'acked': False, 'last_alert': 0}, 'gpu': {'state': 'normal', 'acked': False, 'last_alert': 0}}
 
-def manage_router_lock(action):
+TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+
+def load_thresholds():
     try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(OPENWRT_IP, username=OPENWRT_USER, look_for_keys=True)
-        lock_file = f"/tmp/{HOSTNAME}_paused"
-        if action == 'pause': client.exec_command(f"touch {lock_file}")
-        elif action == 'resume': client.exec_command(f"rm -f {lock_file}")
-        client.close()
-        return True
+        with open(THRESHOLDS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        with open(THRESHOLDS_FILE, "w") as f:
+            json.dump(DEFAULT_THRESHOLDS, f, indent=2)
+        return dict(DEFAULT_THRESHOLDS)
+
+
+def get_network_context():
+    try:
+        resp = requests.get("http://ip-api.com/json/", timeout=5).json()
+        lat, lon = resp.get("lat", 0), resp.get("lon", 0)
+        maps = f"https://maps.google.com/?q={lat},{lon}"
+        ts = datetime.datetime.now().strftime("%d/%m/%Y, %H:%M:%S")
+        return (f"Time: {ts}\n"
+                f"ISP Location: {resp.get('city')}, {resp.get('country')} (Data Exchange)\n"
+                f"Coords: {lat}, {lon} ({maps})\n"
+                f"IP: {resp.get('query')} - {resp.get('isp')}")
     except Exception as e:
-        logger.error(f"Router lock error: {e}")
-        return False
+        return f"Context Error: {e}"
+
+
+def send_tg(text, kb=None):
+    data = {"chat_id": ADMIN_CHAT_ID, "text": text}
+    if kb:
+        data["reply_markup"] = json.dumps({"inline_keyboard": kb})
+    try:
+        requests.post(TG_URL, data=data, timeout=10)
+    except Exception as e:
+        logger.error(f"TG send failed: {e}")
 
 
 def heartbeat_loop():
-    if not HEALTHCHECK_URL: return
+    if not HEALTHCHECK_URL:
+        return
     logger.info("Healthcheck heartbeat started.")
     while True:
         try:
             requests.get(HEALTHCHECK_URL, timeout=10)
         except Exception as e:
             logger.error(f"Heartbeat failed: {e}")
-        time.sleep(300)  # Send heartbeat every 5 minutes
+        time.sleep(60)
 
 
-def get_network_context():
-    try:
-        import requests
-        resp = requests.get('http://ip-api.com/json/', timeout=5).json()
-        lat, lon = resp.get('lat', 0), resp.get('lon', 0)
-        maps_link = f"https://maps.google.com/?q={lat},{lon}"
-        ts = datetime.datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
-        return (
-            f"Time: {ts}\n"
-            f"ISP Location: {resp.get('city')}, {resp.get('country')} _(Data Exchange)_\n"
-            f"Coords: {lat}, {lon} ({maps_link})\n"
-            f"IP: {resp.get('query')} · {resp.get('isp')}"
-        )
-    except Exception as e:
-        return f"Context Error: {e}"
 def watchdog_loop():
-    logger.info("Watchdog started.")
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
+    logger.info("Watchdog started (Multi-Tier).")
     while True:
         time.sleep(60)
-        s = adapter.get_status()
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        metrics = {'cpu': s['cpu'], 'ram': s['ram'], 'disk': s['disk']}
-        
-        for metric, value in metrics.items():
-            state = alert_states[metric]
-            if value > 90:
-                if not state['active']:
-                    # New alert
-                    state['active'] = True
-                    state['acked'] = False
-                    state['last_alert'] = time.time()
-                    kb = [[InlineKeyboardButton("Acknowledge", callback_data=f"ack_{metric}")]]
-                    try:
-                        requests.post(url, data={
-                            "chat_id": ADMIN_CHAT_ID, 
-                            "text": f"⚠️ {HOSTNAME} {metric.upper()} Critical: {value}%\nTime: {ts}",
-                            "reply_markup": json.dumps({"inline_keyboard": kb})
-                        })
-                    except Exception as e: logger.error(e)
-                elif not state['acked']:
-                    # Repeat alert every 5 mins if not acked
-                    if time.time() - state['last_alert'] > 300:
-                        state['last_alert'] = time.time()
-                        kb = [[InlineKeyboardButton("Acknowledge", callback_data=f"ack_{metric}")]]
-                        try:
-                            requests.post(url, data={
-                                "chat_id": ADMIN_CHAT_ID, 
-                                "text": f"🔁 {HOSTNAME} {metric.upper()} Still Critical: {value}%\nTime: {ts}",
-                                "reply_markup": json.dumps({"inline_keyboard": kb})
-                            })
-                        except Exception as e: logger.error(e)
-            else:
-                if state['active']:
-                    # Resolved
-                    state['active'] = False
-                    state['acked'] = False
-                    try:
-                        requests.post(url, data={
-                            "chat_id": ADMIN_CHAT_ID, 
-                            "text": f"✅ {HOSTNAME} {metric.upper()} Resolved: {value}%\nTime: {ts}"
-                        })
-                    except Exception as e: logger.error(e)
+        try:
+            s = adapter.get_status()
+            gpu = adapter.get_gpu_usage() if hasattr(adapter, "get_gpu_usage") else -1
+            metrics = {"cpu": s["cpu"], "ram": s["ram"], "disk": s["disk"]}
+            if gpu >= 0:
+                metrics["gpu"] = gpu
+            t = load_thresholds()
+            for metric, value in metrics.items():
+                st = alert_states[metric]
+                warn_t = t.get(metric + "_warn", 80)
+                crit_t = t.get(metric + "_crit", 95)
+                tier = "critical" if value >= crit_t else ("warning" if value >= warn_t else "normal")
+                if tier != st["state"]:
+                    st["state"] = tier
+                    st["acked"] = False
+                    st["last_alert"] = time.time()
+                    if tier == "normal":
+                        send_tg(f"✅ {HOSTNAME} {metric.upper()} Resolved: {value}%")
+                    else:
+                        icon = "🔴" if tier == "critical" else "🟡"
+                        kb = [[{"text": "Acknowledge", "callback_data": f"ack_{metric}"}]]
+                        send_tg(f"{icon} {HOSTNAME} {metric.upper()} {tier.upper()}: {value}%\n\n{get_network_context()}", kb)
+                elif tier != "normal" and not st["acked"] and (time.time() - st["last_alert"] > 300):
+                    st["last_alert"] = time.time()
+                    icon = "🔴" if tier == "critical" else "🟡"
+                    kb = [[{"text": "Acknowledge", "callback_data": f"ack_{metric}"}]]
+                    send_tg(f"🔁 {HOSTNAME} {metric.upper()} Still {tier.upper()}: {value}%", kb)
+        except Exception as e:
+            logger.error(f"Watchdog error: {e}")
 
-async def start(u, c): await u.message.reply_text(f"ARMOR online for {HOSTNAME}.")
+
+async def start(u, c):
+    await u.message.reply_text(f"🛡 ARMOR agent online: {HOSTNAME}")
+
+
 async def status(u, c):
     s = adapter.get_status()
-    await u.message.reply_text(f"🖥 *{HOSTNAME}*\nCPU: {s['cpu']}%\nRAM: {s['ram']}%\nDisk: {s['disk']}%\nUp: {s['uptime']}m", parse_mode='Markdown')
+    gpu = adapter.get_gpu_usage() if hasattr(adapter, "get_gpu_usage") else -1
+    msg = f"🖥 {HOSTNAME}\nCPU: {s['cpu']}%\nRAM: {s['ram']}%\nDisk: {s['disk']}%\nUp: {s['uptime']}"
+    if gpu >= 0:
+        msg += f"\nGPU: {gpu}%"
+    await u.message.reply_text(msg)
+
+
 async def top(u, c):
     procs = adapter.get_top_processes()
-    kb = [[InlineKeyboardButton(f"Kill {p['name']} ({p['pid']})", callback_data=f"k_{p['pid']}")] for p in procs]
-    txt = "🔝 *Top:*\n" + "\n".join([f"• `{p['name']}` ({p['pid']}) - {p['cpu_percent']:.1f}%" for p in procs])
-    await u.message.reply_text(txt, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
-async def btn(u, c):
-    q = u.callback_query; await q.answer()
-    data = q.data
-    if data.startswith("k_"):
-        pid = int(data.split("_")[1])
-        await q.edit_message_text(f"{'✅' if adapter.kill_process(pid) else '❌'} PID {pid}")
-    elif data.startswith("ack_"):
-        metric = data.split("_")[1]
-        if metric in alert_states:
-            alert_states[metric]['acked'] = True
-            await q.edit_message_text(text=f"🔕 {metric.upper()} alert acknowledged. Will notify again when resolved.")
+    kb = [[InlineKeyboardButton(f"Kill {p.get('name')} ({p.get('pid')})", callback_data=f"kill_{p.get('pid')}")] for p in procs]
+    lines = [f"{p.get('name')} | CPU {p.get('cpu')}% | RAM {p.get('mem')}%" for p in procs]
+    await u.message.reply_text("Top processes:\n" + "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+
 async def pause(u, c):
-    await u.message.reply_text("⏸" if manage_router_lock('pause') else "❌")
+    subprocess.run(["ssh", f"{OPENWRT_USER}@{OPENWRT_IP}", f"touch /tmp/{HOSTNAME}_paused"])
+    await u.message.reply_text("⏸ Offline monitoring paused.")
+
+
 async def resume(u, c):
-    await u.message.reply_text("▶️" if manage_router_lock('resume') else "❌")
+    subprocess.run(["ssh", f"{OPENWRT_USER}@{OPENWRT_IP}", f"rm -f /tmp/{HOSTNAME}_paused"])
+    await u.message.reply_text("▶️ Offline monitoring resumed.")
+
+
 async def sleep_cmd(u, c):
-    await u.message.reply_text("💤"); manage_router_lock('pause'); adapter.sleep()
+    subprocess.run(["ssh", f"{OPENWRT_USER}@{OPENWRT_IP}", f"touch /tmp/{HOSTNAME}_paused"])
+    await u.message.reply_text("😴 Sleeping...")
+    adapter.sleep()
+
+
+async def thresholds_cmd(u, c):
+    t = load_thresholds()
+    msg = "⚙️ Thresholds (warn/crit):\n"
+    for m in ["cpu", "ram", "disk", "gpu"]:
+        msg += f"{m.upper()}: {t.get(m + '_warn')}% / {t.get(m + '_crit')}%\n"
+    msg += "\nUsage: /setcpu 80 95"
+    await u.message.reply_text(msg)
+
+
+async def set_metric(u, c, metric):
+    try:
+        a = u.message.text.split()
+        w, cr = int(a[1]), int(a[2])
+        t = load_thresholds()
+        t[metric + "_warn"] = w
+        t[metric + "_crit"] = cr
+        with open(THRESHOLDS_FILE, "w") as f:
+            json.dump(t, f, indent=2)
+        await u.message.reply_text(f"✅ {metric.upper()} set: warn {w}% / crit {cr}%")
+    except Exception:
+        await u.message.reply_text(f"Usage: /set{metric} <warn> <crit>")
+
+
+async def setcpu(u, c): await set_metric(u, c, "cpu")
+async def setram(u, c): await set_metric(u, c, "ram")
+async def setdisk(u, c): await set_metric(u, c, "disk")
+async def setgpu(u, c): await set_metric(u, c, "gpu")
+
+
+async def btn(u, c):
+    q = u.callback_query
+    await q.answer()
+    d = q.data
+    if d.startswith("ack_"):
+        m = d[4:]
+        if m in alert_states:
+            alert_states[m]["acked"] = True
+            await q.edit_message_text(q.message.text + "\n\n🤫 Acknowledged by admin.")
+    elif d.startswith("kill_"):
+        pid = int(d[5:])
+        try:
+            adapter.kill_process(pid)
+            await q.edit_message_text(q.message.text + f"\n\n💀 Kill signal sent to PID {pid}.")
+        except Exception:
+            await q.edit_message_text(q.message.text + f"\n\n❌ Could not kill PID {pid}.")
+
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    send_tg(f"🟢 {HOSTNAME} System Booted\n\n{get_network_context()}")
     threading.Thread(target=watchdog_loop, daemon=True).start()
-    for h in [CommandHandler("start", start), CommandHandler("status", status), CommandHandler("top", top),
-              CommandHandler("pause", pause), CommandHandler("resume", resume), CommandHandler("sleep", sleep_cmd),
-              CallbackQueryHandler(btn)]:
-        app.add_handler(h)
-    
-    # Send Startup Alert
-    context = get_network_context()
-    startup_msg = f"🟢 *{HOSTNAME} System Booted*\n\n{context}"
-    try:
-        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-                      data={"chat_id": ADMIN_CHAT_ID, "text": startup_msg, "parse_mode": "Markdown"})
-    except Exception as e:
-        logger.error(f"Startup alert failed: {e}")
-
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("pause", pause))
+    app.add_handler(CommandHandler("resume", resume))
+    app.add_handler(CommandHandler("sleep", sleep_cmd))
+    app.add_handler(CommandHandler("thresholds", thresholds_cmd))
+    app.add_handler(CommandHandler("setcpu", setcpu))
+    app.add_handler(CommandHandler("setram", setram))
+    app.add_handler(CommandHandler("setdisk", setdisk))
+    app.add_handler(CommandHandler("setgpu", setgpu))
+    app.add_handler(CallbackQueryHandler(btn))
     app.run_polling()
 
-if __name__ == '__main__': main()
+
+if __name__ == "__main__":
+    main()

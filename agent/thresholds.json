@@ -1,0 +1,10 @@
+{
+  "cpu_warn": 80,
+  "cpu_crit": 95,
+  "ram_warn": 80,
+  "ram_crit": 95,
+  "disk_warn": 85,
+  "disk_crit": 95,
+  "gpu_warn": 80,
+  "gpu_crit": 95
+}

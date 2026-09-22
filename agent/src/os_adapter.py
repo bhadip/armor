@@ -2,6 +2,14 @@ import os, platform, subprocess, signal, time, psutil
 
 class OSAdapter:
     def __init__(self): self.system = platform.system()
+    
+    def get_gpu_usage(self):
+        try:
+            res = subprocess.run(['nvidia-smi', '--query-gpu=utilization.gpu', '--format=csv,noheader,nounits'], capture_output=True, text=True, timeout=2)
+            if res.returncode == 0: return int(res.stdout.strip())
+        except: pass
+        return -1
+
     def get_status(self):
         return {"cpu": psutil.cpu_percent(1), "ram": psutil.virtual_memory().percent,
                 "disk": psutil.disk_usage('/').percent, 
