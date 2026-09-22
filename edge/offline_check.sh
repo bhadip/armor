@@ -10,19 +10,43 @@ fi
 DEBIAN_IP="192.168.50.2"
 MAC_IP="192.168.50.3"
 
+get_context() {
+    DATA=$(curl -s http://ip-api.com/json/)
+    IP=$(echo $DATA | jsonfilter -e '$.query')
+    ISP=$(echo $DATA | jsonfilter -e '$.isp')
+    CITY=$(echo $DATA | jsonfilter -e '$.city')
+    COUNTRY=$(echo $DATA | jsonfilter -e '$.country')
+    LAT=$(echo $DATA | jsonfilter -e '$.lat')
+    LON=$(echo $DATA | jsonfilter -e '$.lon')
+    
+    if [ -z "$IP" ]; then
+        IP=$(curl -s https://ifconfig.me)
+        ISP="Unknown"
+        CITY="Unknown"
+        LAT="0"
+        LON="0"
+    fi
+    
+    echo "Time: $(date +"%d/%m/%Y, %H:%M:%S")
+ISP Location: $CITY, $COUNTRY (Data Exchange)
+Coords: $LAT, $LON (https://maps.google.com/?q=$LAT,$LON)
+IP: $IP · $ISP"
+}
+
 check_node() {
     IP=$1
     NAME=$2
     FLAG="/tmp/${NAME}_down"
-    TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
     
     if [ -f "/tmp/${NAME}_paused" ]; then return; fi
 
     ping -c 2 -W 2 $IP > /dev/null
     if [ $? -ne 0 ]; then
         if [ ! -f "$FLAG" ]; then
+            CONTEXT=$(get_context)
             MSG="🔴 $NAME is OFFLINE
-Time: $TIMESTAMP"
+
+$CONTEXT"
             curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
             -d chat_id="$TG_CHAT" \
             --data-urlencode "text=$MSG"
@@ -30,8 +54,10 @@ Time: $TIMESTAMP"
         fi
     else
         if [ -f "$FLAG" ]; then
+            CONTEXT=$(get_context)
             MSG="🟢 $NAME is BACK ONLINE
-Time: $TIMESTAMP"
+
+$CONTEXT"
             curl -s -X POST "https://api.telegram.org/bot$TG_TOKEN/sendMessage" \
             -d chat_id="$TG_CHAT" \
             --data-urlencode "text=$MSG"
