@@ -30,3 +30,10 @@ To safely sync local changes with GitHub without merge conflicts:
 \`\`\`bash
 ./sync.sh
 \`\`\`
+
+### Headless Linux (Debian/Ubuntu Server) Limitations
+Because `psth1` runs without a graphical desktop environment (X11/Wayland) or physical audio/display hardware, the following commands will gracefully return "Not applicable" or "Hardware not available":
+- **Visuals:** `/shot`, `/cam` (No display or webcam attached).
+- **Audio/Hardware:** `/vol`, `/bright`, `/say` (No soundcards or display backlight control).
+- **GUI Management:** `/apps` (No window manager running).
+- **Clipboard:** `/clip get`, `/clip set` (System clipboard requires an active GUI session).

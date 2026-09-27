@@ -68,3 +68,6 @@ $CONTEXT"
 
 check_node $DEBIAN_IP "psth1"
 check_node $MAC_IP "pstt1"
+
+# Send heartbeat to Healthchecks.io
+curl -m 10 -s https://hc-ping.com/237340b2-fed6-47ec-8c33-210a83c89188 > /dev/null
