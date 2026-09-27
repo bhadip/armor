@@ -1,4 +1,10 @@
-import os, sys, json, time, psutil, platform, subprocess
+import os
+import sys
+import json
+import time
+import psutil
+import platform
+import subprocess
 
 def _run(cmd, timeout=5):
     try:
@@ -16,9 +22,27 @@ class OSAdapter:
         ram = psutil.virtual_memory().percent
         disk = psutil.disk_usage('/').percent
         uptime_secs = int(time.time() - psutil.boot_time())
-        hours, remainder = divmod(uptime_secs, 3600)
-        mins, secs = divmod(remainder, 60)
-        return {"cpu": cpu, "ram": ram, "disk": disk, "uptime": f"{hours}h {mins}m {secs}s"}
+        
+        years = uptime_secs // (365 * 24 * 3600)
+        uptime_secs %= (365 * 24 * 3600)
+        months = uptime_secs // (30 * 24 * 3600)
+        uptime_secs %= (30 * 24 * 3600)
+        days = uptime_secs // (24 * 3600)
+        uptime_secs %= (24 * 3600)
+        hours = uptime_secs // 3600
+        uptime_secs %= 3600
+        mins = uptime_secs // 60
+        secs = uptime_secs % 60
+        
+        parts = []
+        if years > 0: parts.append(f"{years}y")
+        if months > 0: parts.append(f"{months}m")
+        if days > 0: parts.append(f"{days}d")
+        if hours > 0: parts.append(f"{hours}h")
+        if mins > 0: parts.append(f"{mins}m")
+        parts.append(f"{secs}s")
+        
+        return {"cpu": cpu, "ram": ram, "disk": disk, "uptime": " ".join(parts)}
 
     def get_gpu_usage(self):
         if self.is_mac: return -1
@@ -52,21 +76,36 @@ class OSAdapter:
             ram_gb = round(int(ram) / (1024**3), 1) if ok2 and ram.isdigit() else "?"
             return f"Model: {model if ok1 else 'Unknown'}\nRAM: {ram_gb} GB"
         else:
-            ok1, cpu_raw, _ = _run(["grep", "-m1", "model name", "/proc/cpuinfo"])
-            cpu = cpu_raw.split(":")[1].strip() if ok1 else "Unknown"
-            ok2, ram_raw, _ = _run(["free", "-h"])
-            ram = ram_raw.split("\n")[1].split()[1] if ok2 else "Unknown"
+            cpu = "Unknown"
+            try:
+                with open("/proc/cpuinfo", "r") as f:
+                    for line in f:
+                        if "model name" in line:
+                            cpu = line.split(":")[1].strip()
+                            break
+            except: pass
+            ram = "Unknown"
+            try:
+                with open("/proc/meminfo", "r") as f:
+                    for line in f:
+                        if "MemTotal" in line:
+                            kb = int(line.split()[1])
+                            ram = f"{round(kb / 1024 / 1024, 1)} GB"
+                            break
+            except: pass
             return f"CPU: {cpu}\nRAM: {ram}"
 
     def get_apps(self):
         if self.is_mac:
             ok, out, err = _run(["osascript", "-e", 'tell application "System Events" to get name of every process whose background only is false'], timeout=5)
             if ok: return [a.strip() for a in out.split(',') if a.strip()]
-            return ["Permission Denied (Check Accessibility in System Settings)"]
+            return ["Permission Denied (Check Accessibility)"]
         else:
+            if not os.environ.get("DISPLAY"):
+                return ["Not applicable (Headless Linux has no active GUI session)"]
             ok, out, err = _run(["wmctrl", "-l"], timeout=5)
-            if ok: return [line.split(None, 2)[2] for line in out.splitlines() if line]
-            return ["wmctrl not installed or no X11"]
+            if ok and out.strip(): return [line.split(None, 2)[2] for line in out.splitlines() if line]
+            return ["No GUI apps running or wmctrl not installed"]
 
     def control_app(self, name, action):
         if self.is_mac:
@@ -138,8 +177,16 @@ class OSAdapter:
         return False
 
     def say_text(self, text):
+        if not self.is_mac:
+            ok, out, _ = _run(["aplay", "-l"], timeout=3)
+            if not ok or "no soundcards" in out.lower():
+                return "Headless_NoAudio"
         cmd = ["say", text] if self.is_mac else ["espeak", text]
-        subprocess.Popen(cmd)
+        try:
+            subprocess.Popen(cmd)
+            return True
+        except:
+            return False
 
     def run_shortcut(self, name):
         if not self.is_mac: return False
@@ -147,11 +194,15 @@ class OSAdapter:
         return ok
 
     def get_clipboard(self):
+        if not self.is_mac and not os.environ.get("DISPLAY"):
+            return "Headless_NoX11"
         cmd = ["pbpaste"] if self.is_mac else ["xclip", "-selection", "clipboard", "-o"]
         ok, out, err = _run(cmd, timeout=3)
-        return out if ok else "(Empty or requires X11/Wayland session)"
+        return out if ok else "Headless_NoX11"
 
     def set_clipboard(self, text):
+        if not self.is_mac and not os.environ.get("DISPLAY"):
+            return False
         cmd = ["pbcopy"] if self.is_mac else ["xclip", "-selection", "clipboard"]
         try: 
             subprocess.run(cmd, input=text.encode(), check=True, timeout=3)

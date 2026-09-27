@@ -113,29 +113,50 @@ def watchdog_loop():
                     send_tg(" " + HOSTNAME + " " + metric.upper() + " Still " + tier.upper() + ": " + str(value) + "%", kb)
         except Exception as e: logger.error("Watchdog error: " + str(e))
 
-# --- Phase 1 Commands ---
 async def start(u, c): await u.message.reply_text("🛡 ARMOR agent online: " + HOSTNAME)
 async def status(u, c):
     s = adapter.get_status()
     gpu = adapter.get_gpu_usage() if hasattr(adapter, "get_gpu_usage") else -1
-    msg = " " + HOSTNAME + "\nCPU: " + str(s['cpu']) + "%\nRAM: " + str(s['ram']) + "%\nDisk: " + str(s['disk']) + "%\nUp: " + s['uptime']
+    msg = "🖥 " + HOSTNAME + "\nCPU: " + str(s['cpu']) + "%\nRAM: " + str(s['ram']) + "%\nDisk: " + str(s['disk']) + "%\nUp: " + s['uptime']
     if gpu >= 0: msg += "\nGPU: " + str(gpu) + "%"
     await u.message.reply_text(msg)
 
 async def top(u, c):
     procs = adapter.get_top_processes()
     kb = [[InlineKeyboardButton("Kill " + str(p.get('name')), callback_data="kill_" + str(p.get('pid')))] for p in procs]
-    lines = [str(p.get('name')) + " | CPU " + str(p.get('cpu_percent')) + "% | RAM " + str(p.get('memory_percent')) + "%" for p in procs]
+    lines = [str(p.get('name')) + " | CPU " + f"{p.get('cpu_percent') or 0:.1f}" + "% | RAM " + f"{p.get('memory_percent') or 0:.1f}" + "%" for p in procs]
     await u.message.reply_text("Top processes:\n" + "\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
 
 async def pause(u, c):
-    subprocess.run(["ssh", OPENWRT_USER + "@" + OPENWRT_IP, "touch /tmp/" + HOSTNAME + "_paused"])
-    await u.message.reply_text("⏸ Offline monitoring paused.")
+    try:
+        subprocess.run(
+            ["/usr/bin/ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"{OPENWRT_USER}@{OPENWRT_IP}", f"touch /tmp/{HOSTNAME}_paused"],
+            timeout=10, check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
+        await u.message.reply_text("⏸ Offline monitoring paused.")
+    except subprocess.CalledProcessError as e:
+        await u.message.reply_text("❌ SSH Error: " + e.stderr.strip())
+    except subprocess.TimeoutExpired:
+        await u.message.reply_text("❌ SSH Timed Out. Router unreachable.")
+    except Exception as e:
+        await u.message.reply_text("❌ Error: " + str(e))
+
 async def resume(u, c):
-    subprocess.run(["ssh", OPENWRT_USER + "@" + OPENWRT_IP, "rm -f /tmp/" + HOSTNAME + "_paused"])
-    await u.message.reply_text("▶️ Offline monitoring resumed.")
+    try:
+        subprocess.run(
+            ["/usr/bin/ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"{OPENWRT_USER}@{OPENWRT_IP}", f"rm -f /tmp/{HOSTNAME}_paused"],
+            timeout=10, check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL
+        )
+        await u.message.reply_text("▶️ Offline monitoring resumed.")
+    except subprocess.CalledProcessError as e:
+        await u.message.reply_text("❌ SSH Error: " + e.stderr.strip())
+    except subprocess.TimeoutExpired:
+        await u.message.reply_text("❌ SSH Timed Out. Router unreachable.")
+    except Exception as e:
+        await u.message.reply_text(" Error: " + str(e))
+
 async def sleep_cmd(u, c):
-    subprocess.run(["ssh", OPENWRT_USER + "@" + OPENWRT_IP, "touch /tmp/" + HOSTNAME + "_paused"])
+    subprocess.run(["/usr/bin/ssh", "-o", "ConnectTimeout=3", f"{OPENWRT_USER}@{OPENWRT_IP}", f"touch /tmp/{HOSTNAME}_paused"], timeout=5)
     await u.message.reply_text("😴 Sleeping...")
     adapter.sleep()
 
@@ -170,7 +191,6 @@ async def interval_cmd(u, c):
         await u.message.reply_text("✅ Watchdog interval set to " + str(val) + "s.")
     except Exception: await u.message.reply_text("Usage: /interval <seconds>")
 
-# --- Phase 2 Commands ---
 async def sysinfo_cmd(u, c):
     info = adapter.get_sysinfo()
     await u.message.reply_text("🖥 *System Info*\n\n" + info, parse_mode="Markdown")
@@ -185,16 +205,16 @@ async def cam_cmd(u, c):
     await u.message.reply_text("📸 Snapping photo...")
     path = adapter.capture_cam()
     if path: await u.message.reply_photo(open(path, "rb"))
-    else: await u.message.reply_text("❌ Camera failed. (Mac: `brew install imagesnap`, Lin: `apt install ffmpeg`)")
+    else: await u.message.reply_text("❌ Hardware not available or missing tools.")
 
 async def clip_cmd(u, c):
     args = u.message.text.split(maxsplit=1)
     if len(args) < 2 or args[1].startswith("get"):
         clip_text = adapter.get_clipboard()
-        if "requires X11" in clip_text:
+        if clip_text == "Headless_NoX11":
             await u.message.reply_text("❌ Not applicable to this OS setting (Headless Linux has no active GUI clipboard).")
         else:
-            await u.message.reply_text("📋 Clipboard:\n`" + clip_text + "`", parse_mode="Markdown")
+            await u.message.reply_text("📋 Clipboard:\n`" + (clip_text if clip_text else "(Empty)") + "`", parse_mode="Markdown")
     elif args[1].startswith("set "):
         if adapter.set_clipboard(args[1][4:]):
             await u.message.reply_text("✅ Copied to clipboard.")
@@ -210,7 +230,7 @@ async def apps_cmd(u, c):
 
 async def netinfo_cmd(u, c):
     ssid = adapter.get_network_info()
-    await u.message.reply_text(" Current Network: " + ssid)
+    await u.message.reply_text("📶 Current Network: " + ssid)
 
 async def vol_cmd(u, c):
     try:
@@ -237,19 +257,29 @@ async def shot_cmd(u, c):
     await u.message.reply_text("📸 Taking screenshot...")
     path = adapter.take_screenshot()
     if path: await u.message.reply_photo(open(path, "rb"))
-    else: await u.message.reply_text("❌ Screenshot failed.")
+    else: await u.message.reply_text("❌ Hardware not available or missing tools.")
 
 async def media_cmd(u, c):
-    action = u.message.text.split()[1] if len(u.message.text.split()) > 1 else "play"
-    adapter.media_control(action)
-    await u.message.reply_text("🎵 Media: " + action)
+    args = u.message.text.split()
+    action = args[1] if len(args) > 1 else ""
+    if not action:
+        await u.message.reply_text("Usage: /media <play|pause|next|prev>")
+        return
+    if adapter.media_control(action):
+        await u.message.reply_text("🎵 Media: " + action)
+    else:
+        await u.message.reply_text("❌ Not applicable to this OS setting (No media player active).")
 
 async def say_cmd(u, c):
     text = u.message.text.replace("/say", "").strip()
-    if text:
-        adapter.say_text(text)
-        await u.message.reply_text(" Speaking...")
-    else: await u.message.reply_text("Usage: /say <text>")
+    if not text: return await u.message.reply_text("Usage: /say <text>")
+    result = adapter.say_text(text)
+    if result == "Headless_NoAudio":
+        await u.message.reply_text("❌ Not applicable to this OS setting (No audio hardware or sound server detected).")
+    elif result:
+        await u.message.reply_text("🗣 Speaking...")
+    else:
+        await u.message.reply_text("❌ Failed to execute text-to-speech.")
 
 async def btn(u, c):
     q = u.callback_query
@@ -273,18 +303,19 @@ async def btn(u, c):
         await q.edit_message_text(q.message.text + "\n\n✅ Sent " + action + " to " + name + ".")
 
 def main():
-    send_tg(" " + HOSTNAME + " System Booted\n\n" + get_network_context())
+    send_tg("🟢 " + HOSTNAME + " System Booted\n\n" + get_network_context())
     threading.Thread(target=watchdog_loop, daemon=True).start()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
     
     handlers = [
         ("start", start), ("status", status), ("top", top), ("pause", pause), ("resume", resume),
-        ("sleep", sleep_cmd), ("thresholds", thresholds_cmd), ("setcpu", setcpu), ("setram", setram),
-        ("setdisk", setdisk), ("setgpu", setgpu), ("interval", interval_cmd), ("sysinfo", sysinfo_cmd),
-        ("shortcut", shortcut_cmd), ("cam", cam_cmd), ("clip", clip_cmd), ("apps", apps_cmd),
-        ("netinfo", netinfo_cmd), ("vol", vol_cmd), ("bright", bright_cmd), ("battery", battery_cmd),
-        ("shot", shot_cmd), ("media", media_cmd), ("say", say_cmd)
+        ("sleep", sleep_cmd), ("thresholds", thresholds_cmd), ("threshold", thresholds_cmd),
+        ("setcpu", setcpu), ("setram", setram), ("setdisk", setdisk), ("setgpu", setgpu), 
+        ("interval", interval_cmd), ("sysinfo", sysinfo_cmd), ("shortcut", shortcut_cmd), 
+        ("cam", cam_cmd), ("clip", clip_cmd), ("apps", apps_cmd), ("netinfo", netinfo_cmd), 
+        ("vol", vol_cmd), ("bright", bright_cmd), ("battery", battery_cmd), ("shot", shot_cmd), 
+        ("media", media_cmd), ("say", say_cmd)
     ]
     for name, func in handlers: app.add_handler(CommandHandler(name, func))
     app.add_handler(CallbackQueryHandler(btn))
