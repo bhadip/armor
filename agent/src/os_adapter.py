@@ -1,10 +1,4 @@
-import os
-import sys
-import json
-import time
-import psutil
-import platform
-import subprocess
+import os, sys, json, time, psutil, platform, subprocess
 
 def _run(cmd, timeout=5):
     try:
@@ -22,18 +16,11 @@ class OSAdapter:
         ram = psutil.virtual_memory().percent
         disk = psutil.disk_usage('/').percent
         uptime_secs = int(time.time() - psutil.boot_time())
-        
-        years = uptime_secs // (365 * 24 * 3600)
-        uptime_secs %= (365 * 24 * 3600)
-        months = uptime_secs // (30 * 24 * 3600)
-        uptime_secs %= (30 * 24 * 3600)
-        days = uptime_secs // (24 * 3600)
-        uptime_secs %= (24 * 3600)
-        hours = uptime_secs // 3600
-        uptime_secs %= 3600
-        mins = uptime_secs // 60
-        secs = uptime_secs % 60
-        
+        years = uptime_secs // (365 * 24 * 3600); uptime_secs %= (365 * 24 * 3600)
+        months = uptime_secs // (30 * 24 * 3600); uptime_secs %= (30 * 24 * 3600)
+        days = uptime_secs // (24 * 3600); uptime_secs %= (24 * 3600)
+        hours = uptime_secs // 3600; uptime_secs %= 3600
+        mins = uptime_secs // 60; secs = uptime_secs % 60
         parts = []
         if years > 0: parts.append(f"{years}y")
         if months > 0: parts.append(f"{months}m")
@@ -41,7 +28,6 @@ class OSAdapter:
         if hours > 0: parts.append(f"{hours}h")
         if mins > 0: parts.append(f"{mins}m")
         parts.append(f"{secs}s")
-        
         return {"cpu": cpu, "ram": ram, "disk": disk, "uptime": " ".join(parts)}
 
     def get_gpu_usage(self):
@@ -51,6 +37,10 @@ class OSAdapter:
 
     def get_top_processes(self, limit=5):
         procs = []
+        for p in psutil.process_iter(['pid', 'name']):
+            try: p.cpu_percent(interval=None)
+            except: pass
+        time.sleep(0.1)
         for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
             try: 
                 info = p.info
@@ -70,30 +60,76 @@ class OSAdapter:
         _run(cmd, timeout=3)
 
     def get_sysinfo(self):
-        if self.is_mac:
-            ok1, model, _ = _run(["sysctl", "-n", "hw.model"])
-            ok2, ram, _ = _run(["sysctl", "-n", "hw.memsize"])
-            ram_gb = round(int(ram) / (1024**3), 1) if ok2 and ram.isdigit() else "?"
-            return f"Model: {model if ok1 else 'Unknown'}\nRAM: {ram_gb} GB"
-        else:
-            cpu = "Unknown"
-            try:
-                with open("/proc/cpuinfo", "r") as f:
-                    for line in f:
-                        if "model name" in line:
-                            cpu = line.split(":")[1].strip()
+        try:
+            if self.is_mac:
+                model_id = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True).stdout.strip()
+                chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True).stdout.strip()
+                ncpu = subprocess.run(["sysctl", "-n", "hw.ncpu"], capture_output=True, text=True).stdout.strip()
+                ram_bytes = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip()
+                ram_gb = round(int(ram_bytes) / (1024**3), 1) if ram_bytes.isdigit() else "?"
+                
+                # Serial (system_profiler is 100% reliable on macOS)
+                serial = "Unknown"
+                try:
+                    sp_out = subprocess.run(["system_profiler", "SPHardwareDataType"], capture_output=True, text=True, timeout=10).stdout
+                    for line in sp_out.split('\n'):
+                        if "Serial Number" in line:
+                            serial = line.split(":")[1].strip()
                             break
-            except: pass
-            ram = "Unknown"
-            try:
-                with open("/proc/meminfo", "r") as f:
-                    for line in f:
-                        if "MemTotal" in line:
-                            kb = int(line.split()[1])
-                            ram = f"{round(kb / 1024 / 1024, 1)} GB"
-                            break
-            except: pass
-            return f"CPU: {cpu}\nRAM: {ram}"
+                except Exception:
+                    pass
+
+                os_name = subprocess.run(["sw_vers", "-productName"], capture_output=True, text=True).stdout.strip()
+                os_ver = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip()
+                
+                disk = psutil.disk_usage('/')
+                storage = f"{disk.free/1024**3:.2f} GB available of {disk.total/1024**3:.2f} GB"
+                
+                gfx = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True, timeout=10).stdout
+                gpu_name, vram, resolution = "Unknown", "Unified", "Unknown"
+                gpu_count = 0
+                for line in gfx.split('\n'):
+                    if "Chipset Model:" in line: 
+                        gpu_name = line.split(':')[1].strip()
+                        gpu_count += 1
+                    if "VRAM" in line and "Total" in line: 
+                        vram = line.split(':')[1].strip()
+                    if "Resolution:" in line: 
+                        resolution = line.split(':')[1].strip()
+
+                return (f"Model: Mac Mini ({model_id})\n"
+                        f"Chip/Processor: {chip} ({ncpu} Cores)\n"
+                        f"Memory: {ram_gb} GB\n"
+                        f"Graphics: {gpu_name} ({vram}) x{gpu_count}\n"
+                        f"Display: {resolution}\n"
+                        f"Storage: {storage}\n"
+                        f"Serial: {serial}\n"
+                        f"OS: {os_name} {os_ver}")
+            else:
+                cpu = "Unknown"
+                try:
+                    res = subprocess.run(["lscpu"], capture_output=True, text=True)
+                    if res.returncode == 0:
+                        for line in res.stdout.split('\n'):
+                            if "Model name:" in line: cpu = line.split(":")[1].strip()
+                except: pass
+                ncpu = subprocess.run(["nproc"], capture_output=True, text=True).stdout.strip()
+                ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
+                
+                lspci = subprocess.run(["lspci"], capture_output=True, text=True).stdout
+                gpus = [line.split(':', 2)[2].strip() for line in lspci.split('\n') if 'VGA' in line or '3D' in line]
+                gpu_str = ", ".join(gpus) if gpus else "None/Headless"
+                
+                disk = psutil.disk_usage('/')
+                storage = f"{disk.free/1024**3:.2f} GB available of {disk.total/1024**3:.2f} GB"
+                os_ver = platform.platform()
+                return (f"CPU: {cpu} ({ncpu} Cores)\n"
+                        f"RAM: {ram_gb} GB\n"
+                        f"GPU: {gpu_str}\n"
+                        f"Storage: {storage}\n"
+                        f"OS: {os_ver}")
+        except Exception as e:
+            return f"Error fetching sysinfo: {e}"
 
     def get_apps(self):
         if self.is_mac:
@@ -116,14 +152,64 @@ class OSAdapter:
             elif action == "force_quit": _run(["pkill", "-9", "-f", name])
 
     def get_network_info(self):
-        if self.is_mac:
-            ok, out, _ = _run(["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "-I"], timeout=3)
-            for line in out.split('\n'):
-                if ' SSID: ' in line: return line.split(':')[1].strip()
-            return "Wi-Fi Off or Ethernet"
-        else:
-            ok, out, _ = _run(["iwgetid", "-r"], timeout=3)
-            return out if ok else "Ethernet/Unknown"
+        try:
+            if self.is_mac:
+                ports_out = subprocess.run(["networksetup", "-listallhardwareports"], capture_output=True, text=True).stdout
+                active_port, active_device = "Unknown", ""
+                current_port, current_dev = "", ""
+                for line in ports_out.split('\n'):
+                    if "Hardware Port:" in line: current_port = line.split(':', 1)[1].strip()
+                    if "Device:" in line: 
+                        current_dev = line.split(':', 1)[1].strip()
+                        ip_check = subprocess.run(["ipconfig", "getifaddr", current_dev], capture_output=True, text=True).stdout.strip()
+                        if ip_check and ip_check.startswith("192.168."):
+                            active_port, active_device = current_port, current_dev
+                            break
+                
+                if not active_device:
+                    return "Status: No active LAN connection (Only Tailscale/VPN detected)"
+
+                ip4 = subprocess.run(["ipconfig", "getifaddr", active_device], capture_output=True, text=True).stdout.strip() or "N/A"
+                
+                mac = "N/A"
+                ifconf_out = subprocess.run(["ifconfig", active_device], capture_output=True, text=True).stdout
+                for line in ifconf_out.split('\n'):
+                    if "ether " in line:
+                        mac = line.split()[1]
+                        break
+
+                dns_out = subprocess.run(["networksetup", "-getdnsservers", active_port], capture_output=True, text=True).stdout
+                if "aren't any" in dns_out:
+                    try:
+                        with open('/etc/resolv.conf', 'r') as f:
+                            dns_out = " ".join([l.split()[1] for l in f.readlines() if l.startswith("nameserver")])
+                    except: dns_out = "N/A"
+                
+                ssid = "N/A (Ethernet)"
+                if "Wi-Fi" in active_port:
+                    airport_out = subprocess.run(["/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport", "-I"], capture_output=True, text=True).stdout
+                    for line in airport_out.split('\n'):
+                        if ' SSID: ' in line: ssid = line.split(':')[1].strip()
+
+                return f"Port: {active_port} ({active_device})\nSSID: {ssid}\nIPv4: {ip4}\nMAC: {mac}\nDNS: {dns_out.strip()}"
+            else:
+                ok, out, _ = _run(["ip", "-4", "addr", "show"], timeout=3)
+                ip4, mac = "N/A", "N/A"
+                if ok:
+                    for line in out.split("\n"):
+                        if "inet " in line: ip4 = line.split()[1].split('/')[0]
+                ok2, out2, _ = _run(["ip", "link", "show"], timeout=3)
+                if ok2:
+                    for line in out2.split("\n"):
+                        if "link/ether" in line: mac = line.split()[1]; break
+                dns = "N/A"
+                try:
+                    with open("/etc/resolv.conf", "r") as f:
+                        dns = " ".join([l.split()[1] for l in f.readlines() if l.startswith("nameserver")])
+                except: pass
+                return f"IPv4: {ip4}\nMAC: {mac}\nDNS: {dns}"
+        except Exception as e:
+            return f"Error fetching network info: {e}"
 
     def take_screenshot(self):
         path = "/tmp/shot.jpg"
@@ -160,9 +246,6 @@ class OSAdapter:
             ok, out, _ = _run(["pmset", "-g", "batt"], timeout=3)
             return out.strip().split('\n')[0] if ok and out else "No Battery"
         else:
-            ok, out, _ = _run(["upower", "-i", "/org/freedesktop/UPower/devices/battery_BAT0"], timeout=3)
-            for line in out.split('\n'):
-                if 'percentage:' in line: return line.split(':')[1].strip()
             return "No Battery (Headless/Desktop)"
 
     def media_control(self, action):

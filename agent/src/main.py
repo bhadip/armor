@@ -192,8 +192,11 @@ async def interval_cmd(u, c):
     except Exception: await u.message.reply_text("Usage: /interval <seconds>")
 
 async def sysinfo_cmd(u, c):
-    info = adapter.get_sysinfo()
-    await u.message.reply_text("🖥 *System Info*\n\n" + info, parse_mode="Markdown")
+    try:
+        info = adapter.get_sysinfo()
+        await u.message.reply_text("🖥 *System Info*\n\n" + info, parse_mode="Markdown")
+    except Exception as e:
+        await u.message.reply_text(" Error fetching sysinfo: " + str(e))
 
 async def shortcut_cmd(u, c):
     name = u.message.text.replace("/shortcut", "").strip()
@@ -229,8 +232,11 @@ async def apps_cmd(u, c):
     await u.message.reply_text("Running Apps:\n" + "\n".join(apps[:10]), reply_markup=InlineKeyboardMarkup(kb))
 
 async def netinfo_cmd(u, c):
-    ssid = adapter.get_network_info()
-    await u.message.reply_text("📶 Current Network: " + ssid)
+    try:
+        info = adapter.get_network_info()
+        await u.message.reply_text(" Network Info:\n" + info)
+    except Exception as e:
+        await u.message.reply_text("❌ Error fetching network info: " + str(e))
 
 async def vol_cmd(u, c):
     try:
