@@ -194,7 +194,8 @@ async def interval_cmd(u, c):
 async def sysinfo_cmd(u, c):
     try:
         info = adapter.get_sysinfo()
-        await u.message.reply_text("🖥 *System Info*\n\n" + info, parse_mode="Markdown")
+        safe_info = info.replace("_", "\_").replace("*", "\*").replace("[", "\[").replace("`", "\`")
+        await u.message.reply_text("🖥 *System Info*\n\n" + safe_info, parse_mode="Markdown")
     except Exception as e:
         await u.message.reply_text(" Error fetching sysinfo: " + str(e))
 

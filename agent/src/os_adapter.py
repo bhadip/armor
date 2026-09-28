@@ -1,4 +1,4 @@
-import os, sys, json, time, psutil, platform, subprocess
+import os, sys, json, time, psutil, platform, subprocess, socket
 
 def _run(cmd, timeout=5):
     try:
@@ -68,7 +68,6 @@ class OSAdapter:
                 ram_bytes = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip()
                 ram_gb = round(int(ram_bytes) / (1024**3), 1) if ram_bytes.isdigit() else "?"
                 
-                # Serial (system_profiler is 100% reliable on macOS)
                 serial = "Unknown"
                 try:
                     sp_out = subprocess.run(["system_profiler", "SPHardwareDataType"], capture_output=True, text=True, timeout=10).stdout
@@ -76,8 +75,7 @@ class OSAdapter:
                         if "Serial Number" in line:
                             serial = line.split(":")[1].strip()
                             break
-                except Exception:
-                    pass
+                except Exception: pass
 
                 os_name = subprocess.run(["sw_vers", "-productName"], capture_output=True, text=True).stdout.strip()
                 os_ver = subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip()
@@ -106,19 +104,26 @@ class OSAdapter:
                         f"Serial: {serial}\n"
                         f"OS: {os_name} {os_ver}")
             else:
+                # Linux (Using psutil & standard libs for 100% reliability)
                 cpu = "Unknown"
                 try:
-                    res = subprocess.run(["lscpu"], capture_output=True, text=True)
-                    if res.returncode == 0:
-                        for line in res.stdout.split('\n'):
-                            if "Model name:" in line: cpu = line.split(":")[1].strip()
-                except: pass
-                ncpu = subprocess.run(["nproc"], capture_output=True, text=True).stdout.strip()
+                    with open("/proc/cpuinfo", "r") as f:
+                        for line in f:
+                            if "model name" in line:
+                                cpu = line.split(":")[1].strip()
+                                break
+                except Exception: pass
+                
+                ncpu = str(psutil.cpu_count(logical=True))
                 ram_gb = round(psutil.virtual_memory().total / (1024**3), 1)
                 
-                lspci = subprocess.run(["lspci"], capture_output=True, text=True).stdout
-                gpus = [line.split(':', 2)[2].strip() for line in lspci.split('\n') if 'VGA' in line or '3D' in line]
-                gpu_str = ", ".join(gpus) if gpus else "None/Headless"
+                gpu_str = "None/Headless"
+                try:
+                    lspci = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3).stdout
+                    gpus = [line.split(':', 2)[2].strip() for line in lspci.split('\n') if 'VGA' in line or '3D' in line]
+                    if gpus: gpu_str = ", ".join(gpus)
+                except FileNotFoundError: pass # lspci not installed
+                except Exception: pass
                 
                 disk = psutil.disk_usage('/')
                 storage = f"{disk.free/1024**3:.2f} GB available of {disk.total/1024**3:.2f} GB"
@@ -193,20 +198,22 @@ class OSAdapter:
 
                 return f"Port: {active_port} ({active_device})\nSSID: {ssid}\nIPv4: {ip4}\nMAC: {mac}\nDNS: {dns_out.strip()}"
             else:
-                ok, out, _ = _run(["ip", "-4", "addr", "show"], timeout=3)
+                # Linux (Using psutil & socket for 100% reliability)
                 ip4, mac = "N/A", "N/A"
-                if ok:
-                    for line in out.split("\n"):
-                        if "inet " in line: ip4 = line.split()[1].split('/')[0]
-                ok2, out2, _ = _run(["ip", "link", "show"], timeout=3)
-                if ok2:
-                    for line in out2.split("\n"):
-                        if "link/ether" in line: mac = line.split()[1]; break
+                for iface, addrs in psutil.net_if_addrs().items():
+                    if iface == 'lo': continue
+                    for addr in addrs:
+                        if addr.family == socket.AF_INET and not addr.address.startswith('127.'):
+                            ip4 = addr.address
+                        elif addr.family == psutil.AF_LINK:
+                            mac = addr.address
+                    if ip4 != "N/A" and mac != "N/A": break
+                
                 dns = "N/A"
                 try:
                     with open("/etc/resolv.conf", "r") as f:
                         dns = " ".join([l.split()[1] for l in f.readlines() if l.startswith("nameserver")])
-                except: pass
+                except Exception: pass
                 return f"IPv4: {ip4}\nMAC: {mac}\nDNS: {dns}"
         except Exception as e:
             return f"Error fetching network info: {e}"
