@@ -235,7 +235,7 @@ async def apps_cmd(u, c):
 async def netinfo_cmd(u, c):
     try:
         info = adapter.get_network_info()
-        await u.message.reply_text(" Network Info:\n" + info)
+        await u.message.reply_text("🌐 Network Info:\n" + info)
     except Exception as e:
         await u.message.reply_text("❌ Error fetching network info: " + str(e))
 

@@ -208,21 +208,12 @@ class OSAdapter:
                     if ip4 != "N/A" and mac != "N/A": break
                 
                 dns = "N/A"
-                # 1. Use absolute paths for tailscale to bypass systemd PATH restrictions
-                ts_out = ""
-                for ts_bin in ["/usr/bin/tailscale", "/usr/local/bin/tailscale", "tailscale"]:
-                    try:
-                        res = subprocess.run([ts_bin, "dns", "status"], capture_output=True, text=True, timeout=5)
-                        if res.returncode == 0:
-                            ts_out = res.stdout
-                            break
-                    except Exception:
-                        pass
-
-                if ts_out:
+                # 1. Use 'tailscale dns status' for authoritative system DNS
+                try:
+                    res = subprocess.run(["tailscale", "dns", "status"], capture_output=True, text=True, timeout=5).stdout
                     in_system = False
                     nameservers = []
-                    for line in ts_out.split('\n'):
+                    for line in res.split('\n'):
                         if "=== System DNS configuration ===" in line:
                             in_system = True
                         elif in_system and line.strip().startswith("- "):
@@ -233,20 +224,22 @@ class OSAdapter:
                             break
                     if nameservers:
                         dns = " ".join(nameservers)
+                except Exception:
+                    pass
 
-                # 2. Fallback to Gateway IP via /proc/net/route (Pure Python)
+                # 2. Fallback to /etc/resolv.conf for non-Tailscale systems
                 if dns == "N/A":
                     try:
-                        import struct
-                        with open('/proc/net/route', 'r') as f:
-                            for line in f.readlines():
-                                fields = line.strip().split()
-                                if len(fields) >= 3 and fields[1] == '00000000':
-                                    gw_ip = socket.inet_ntoa(struct.pack('<L', int(fields[2], 16)))
-                                    dns = f"{gw_ip} (Gateway)"
-                                    break
-                    except Exception:
-                        dns = "192.168.50.1 (Gateway)" # Hardcoded fallback for your network
+                        with open("/etc/resolv.conf", "r") as f:
+                            nameservers = [l.split()[1] for l in f.readlines() if l.startswith("nameserver")]
+                        local_dns = [
+                            ip for ip in nameservers 
+                            if not ip.startswith("100.") 
+                            and not ip.startswith("fd7a:") 
+                            and not ip.startswith("127.")
+                        ]
+                        if local_dns: dns = " ".join(local_dns)
+                    except Exception: pass
                     
                 return f"IPv4: {ip4}\nMAC: {mac}\nDNS: {dns}"
         except Exception as e:
