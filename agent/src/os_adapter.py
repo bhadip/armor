@@ -195,7 +195,25 @@ class OSAdapter:
                     for line in airport_out.split('\n'):
                         if ' SSID: ' in line: ssid = line.split(':')[1].strip()
 
-                return f"Port: {active_port} ({active_device})\nSSID: {ssid}\nIPv4: {ip4}\nMAC: {mac}\nDNS: {dns_out.strip()}"
+                # Check Tailscale status (macOS) via ifconfig (permission-free & reliable)
+                ts_status = "INACTIVE"
+                try:
+                    ifconf_out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+                    lines = ifconf_out.split('\n')
+                    for i, line in enumerate(lines):
+                        # Look for utun interfaces
+                        if "utun" in line and not line.startswith(' '):
+                            # Check the next few lines for a Tailscale IP (100.x.x.x)
+                            for j in range(i, min(i+5, len(lines))):
+                                if "inet 100." in lines[j]:
+                                    ts_status = "ACTIVE"
+                                    break
+                        if ts_status == "ACTIVE":
+                            break
+                except Exception:
+                    pass
+
+                return f"Port: {active_port} ({active_device})\nSSID: {ssid}\nIPv4: {ip4}\nMAC: {mac}\nDNS: {dns_out.strip()}\nTailscale: {ts_status}"
             else:
                 ip4, mac = "N/A", "N/A"
                 for iface, addrs in psutil.net_if_addrs().items():
