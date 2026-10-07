@@ -248,7 +248,21 @@ class OSAdapter:
                     except Exception:
                         dns = "192.168.50.1 (Gateway)" # Hardcoded fallback for your network
                     
-                return f"IPv4: {ip4}\nMAC: {mac}\nDNS: {dns}"
+                # Check Tailscale status
+                ts_status = "INACTIVE"
+                try:
+                    for ts_bin in ["/usr/bin/tailscale", "/usr/local/bin/tailscale", "tailscale"]:
+                        res = subprocess.run([ts_bin, "status", "--json"], capture_output=True, text=True, timeout=5)
+                        if res.returncode == 0:
+                            import json
+                            ts_data = json.loads(res.stdout)
+                            if ts_data.get("BackendState") == "Running":
+                                ts_status = "ACTIVE"
+                            break
+                except Exception:
+                    pass
+
+                return f"IPv4: {ip4}\nMAC: {mac}\nDNS: {dns}\nTailscale: {ts_status}"
         except Exception as e:
             return f"Error fetching network info: {e}"
 
